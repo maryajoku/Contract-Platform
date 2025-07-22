@@ -1,4 +1,4 @@
-;; Contract Negotiation Platform
+;; Contract Negotiation Platform Samrt Contract
 ;; A comprehensive smart contract for creating, negotiating, and executing multi-party contracts
 
 ;; Constants
@@ -22,6 +22,10 @@
 (define-constant ERR-DURATION-TOO-SHORT (err u405))
 (define-constant ERR-FEE-TOO-HIGH (err u500))
 (define-constant ERR-DURATION-TOO-SHORT-ADMIN (err u501))
+(define-constant ERR-INVALID-DESCRIPTION (err u502))
+(define-constant ERR-INVALID-TERMS (err u503))
+(define-constant ERR-INVALID-SIGNATURE (err u504))
+(define-constant ERR-INVALID-CHANGE-DESC (err u505))
 
 ;; Data Variables
 (define-data-var contract-counter uint u0)
@@ -108,6 +112,31 @@
   uint
 )
 
+;; Validation Functions
+(define-private (is-valid-description (description (string-ascii 500)))
+  (and (> (len description) u0) (<= (len description) u500))
+)
+
+(define-private (is-valid-value (value uint))
+  (and (>= value u0) (<= value u340282366920938463463374607431768211455)) ;; max uint
+)
+
+(define-private (is-valid-terms (terms (string-ascii 1000)))
+  (and (> (len terms) u0) (<= (len terms) u1000))
+)
+
+(define-private (is-valid-change-description (desc (string-ascii 200)))
+  (and (> (len desc) u0) (<= (len desc) u200))
+)
+
+(define-private (is-valid-signature-hash (sig-hash (buff 64)))
+  (is-eq (len sig-hash) u64)
+)
+
+(define-private (is-valid-amount (amount uint))
+  (and (> amount u0) (<= amount u340282366920938463463374607431768211455))
+)
+
 ;; Authorization Functions
 (define-private (is-contract-creator (contract-id uint))
   (match (map-get? contracts contract-id)
@@ -170,11 +199,14 @@
     )
     ;; Validation
     (asserts! (> (len title) u0) ERR-INVALID-TITLE)
+    (asserts! (is-valid-description description) ERR-INVALID-DESCRIPTION)
     (asserts! (> participants-count u0) ERR-INVALID-PARTICIPANTS-COUNT)
     (asserts! (<= participants-count u10) ERR-TOO-MANY-PARTICIPANTS)
     (asserts! (> required-signatures u0) ERR-INVALID-REQUIRED-SIGNATURES)
     (asserts! (<= required-signatures participants-count) ERR-SIGNATURES-EXCEED-PARTICIPANTS)
     (asserts! (>= duration (var-get min-contract-duration)) ERR-DURATION-TOO-SHORT)
+    (asserts! (is-valid-value value) ERR-INVALID-AMOUNT)
+    (asserts! (is-valid-terms terms-text) ERR-INVALID-TERMS)
     
     ;; Create contract
     (map-set contracts contract-id
@@ -263,6 +295,8 @@
     (asserts! (can-modify-contract contract-id) ERR-UNAUTHORIZED-ACCESS)
     (asserts! (not (is-contract-expired contract-id)) ERR-CONTRACT-EXPIRED)
     (asserts! (< (get state contract-data) state-fully-signed) ERR-CONTRACT-FINALIZED)
+    (asserts! (is-valid-terms new-terms) ERR-INVALID-TERMS)
+    (asserts! (is-valid-change-description change-description) ERR-INVALID-CHANGE-DESC)
     
     ;; Add revision
     (map-set contract-revisions 
@@ -299,27 +333,27 @@
     )
     
     ;; Reset all signatures
-    (try! (fold reset-participant-signature (get participants contract-data) (ok true)))
+    (try! (fold reset-participant-signature (get participants contract-data) (ok contract-id)))
     
     (ok new-revision)
   )
 )
 
-(define-private (reset-participant-signature (participant principal) (result (response bool uint)))
+(define-private (reset-participant-signature (participant principal) (result (response uint uint)))
   (match result
-    success
+    contract-id
     (begin
       (map-set contract-participants 
-        { contract-id: u0, participant: participant } ;; Note: In real implementation, pass contract-id
+        { contract-id: contract-id, participant: participant }
         (merge 
           (default-to 
             { signed: false, signed-at: u0, role: "participant", can-modify: false }
-            (map-get? contract-participants { contract-id: u0, participant: participant })
+            (map-get? contract-participants { contract-id: contract-id, participant: participant })
           )
           { signed: false, signed-at: u0 }
         )
       )
-      (ok true)
+      (ok contract-id)
     )
     error-code (err error-code)
   )
@@ -340,6 +374,7 @@
     (asserts! (not (get signed participant-data)) ERR-ALREADY-SIGNED)
     (asserts! (not (is-contract-expired contract-id)) ERR-CONTRACT-EXPIRED)
     (asserts! (>= (get state contract-data) state-ready-to-sign) ERR-INVALID-STATE)
+    (asserts! (is-valid-signature-hash signature-hash) ERR-INVALID-SIGNATURE)
     
     ;; Record signature
     (map-set contract-signatures
@@ -518,6 +553,7 @@
 (define-public (withdraw-platform-fees (amount uint))
   (begin
     (asserts! (is-eq tx-sender contract-deployer) ERR-OWNER-ONLY)
+    (asserts! (is-valid-amount amount) ERR-INVALID-AMOUNT)
     (as-contract (stx-transfer? amount tx-sender contract-deployer))
   )
 )
@@ -526,6 +562,8 @@
 (define-public (emergency-pause-contract (contract-id uint))
   (let ((contract-data (unwrap! (map-get? contracts contract-id) ERR-NOT-FOUND)))
     (asserts! (is-eq tx-sender contract-deployer) ERR-OWNER-ONLY)
+    (asserts! (> contract-id u0) ERR-INVALID-STATE)
+    (asserts! (<= contract-id (var-get contract-counter)) ERR-NOT-FOUND)
     
     (map-set contracts contract-id
       (merge contract-data { state: state-cancelled })
